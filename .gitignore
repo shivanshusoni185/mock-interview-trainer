@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Session recordings & transcripts (local practice data, not for version control)
+sessions/*.wav
+sessions/*.json
+!sessions/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model cache (faster-whisper downloads models locally)
+.cache/
+models/
