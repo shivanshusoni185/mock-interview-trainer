@@ -64,6 +64,13 @@ Cover, briefly:
 Keep the whole response under 200 words. Be direct and useful, not just
 encouraging."""
 
+ANSWER_SYSTEM_PROMPT = """You are a practical interview and meeting assistant.
+Given the latest detected question or request and the conversation transcript,
+write a concise suggested response the user can adapt. Do not claim certainty
+when the transcript is incomplete. Use first person, include concrete details
+only when supported by the transcript or candidate context, and output only the
+suggested response. Keep it under 180 words."""
+
 
 def _truncate(text: str, limit: int = MAX_CONTEXT_CHARS) -> str:
     text = (text or "").strip()
@@ -149,5 +156,35 @@ def get_feedback(question: str, transcribed_answer: str) -> str:
         ],
         temperature=0.4,
         max_tokens=400,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def get_direct_answer(question: str, transcript: str) -> str:
+    """Generate an explicit suggested response after capture stops."""
+    user_prompt = (
+        f"Latest question or request:\n{question or '(Extract the latest question from the transcript.)'}\n\n"
+        f"Conversation transcript:\n{transcript or '(No speech detected.)'}"
+    )
+    if LLM_PROVIDER == "anthropic":
+        client = _get_anthropic_client()
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            system=ANSWER_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        return response.content[0].text.strip()
+
+    client = _get_openai_client()
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=300,
     )
     return response.choices[0].message.content.strip()

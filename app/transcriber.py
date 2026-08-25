@@ -1,8 +1,5 @@
 """
-Transcribes a recorded answer file to text using faster-whisper, running
-locally on your machine. This happens AFTER you finish recording an answer
-(not a live streaming transcript during a real interview) -- the practice
-flow is: record -> stop -> transcribe -> get feedback.
+Transcribes recorded audio locally with faster-whisper.
 """
 from pathlib import Path
 from functools import lru_cache
@@ -21,5 +18,11 @@ def _get_model() -> WhisperModel:
 
 def transcribe(audio_path: Path) -> str:
     model = _get_model()
-    segments, _info = model.transcribe(str(audio_path), beam_size=5)
+    segments, _info = model.transcribe(
+        str(audio_path),
+        beam_size=1,
+        best_of=1,
+        condition_on_previous_text=False,
+        vad_filter=True,
+    )
     return " ".join(segment.text.strip() for segment in segments).strip()

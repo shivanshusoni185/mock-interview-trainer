@@ -2,13 +2,8 @@
 Mock Interview Trainer - main desktop application (Windows-friendly, but
 runs anywhere Python + Tk run).
 
-Flow:
-  1. Pick a role / level / optional topic.
-  2. Click "Get Question" -> LLM generates one practice question.
-  3. Click "Start Recording" -> speak your answer into your own mic.
-  4. Click "Stop & Get Feedback" -> local Whisper transcribes your answer,
-     then the LLM gives you structured feedback.
-  5. Everything is saved to sessions/history.json so you can track progress.
+Flow: configure a practice session, capture permitted audio, see a live local
+transcript, then receive post-session coaching.
 
 Nothing here listens to a live call, hides itself from screen-sharing, or
 feeds answers to you while you're being asked a real question by someone
@@ -24,7 +19,7 @@ import customtkinter as ctk
 from app.config import SESSIONS_DIR, LLM_PROVIDER, has_api_key
 from app.audio_recorder import AudioRecorder
 from app.transcriber import transcribe
-from app.llm_client import generate_question, get_feedback
+from app.llm_client import generate_question, get_feedback, get_direct_answer
 from app.session_store import save_round, load_history
 from app.resume_context import load_text_from_file, SUPPORTED_EXTENSIONS
 from app.dashboard import DashboardWindow
@@ -51,6 +46,10 @@ class MockInterviewApp(ctk.CTk):
         self.current_question = ""
         self.current_audio_path: Path | None = None
         self.timer_running = False
+        self.live_transcript_running = False
+        self.live_transcription_in_progress = False
+        self.input_devices = []
+        self.input_device_map = {}
 
         self._build_layout()
 
@@ -147,18 +146,41 @@ class MockInterviewApp(ctk.CTk):
         rec_frame.pack(fill="x", **pad)
 
         self.record_btn = ctk.CTkButton(
-            rec_frame, text="⏺ Start Recording", fg_color="#c0392b",
-            hover_color="#922b21", command=self._on_toggle_record, state="disabled",
+            rec_frame, text="▶ Start Listening", fg_color="#c0392b",
+            hover_color="#922b21", command=self._on_toggle_record,
         )
         self.record_btn.pack(side="left", padx=8, pady=8)
 
+        self.input_device_var = ctk.StringVar(value="Default microphone")
+        self.input_device_menu = ctk.CTkOptionMenu(
+            rec_frame, variable=self.input_device_var, values=["Default microphone"], width=230,
+        )
+        self.input_device_menu.pack(side="left", padx=8)
+        ctk.CTkButton(
+            rec_frame, text="Test microphone", width=120, command=self._on_test_microphone,
+        ).pack(side="left", padx=8)
+
+        self.system_audio_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            rec_frame,
+            text="Capture system audio (consent required)",
+            variable=self.system_audio_var,
+        ).pack(side="left", padx=8)
+
         self.timer_label = ctk.CTkLabel(rec_frame, text="00:00")
         self.timer_label.pack(side="left", padx=8)
+        self.level_label = ctk.CTkLabel(rec_frame, text="Input level: --")
+        self.level_label.pack(side="left", padx=8)
 
         # --- Transcript + feedback ---
         ctk.CTkLabel(self, text="Transcript").pack(anchor="w", padx=16)
         self.transcript_box = ctk.CTkTextbox(self, height=80, wrap="word")
         self.transcript_box.pack(fill="x", **pad)
+
+        ctk.CTkLabel(self, text="Suggested Answer").pack(anchor="w", padx=16)
+        self.answer_box = ctk.CTkTextbox(self, height=110, wrap="word")
+        self.answer_box.pack(fill="x", **pad)
+        self._set_textbox(self.answer_box, "Stop listening to generate a suggested answer.")
 
         ctk.CTkLabel(self, text="Feedback").pack(anchor="w", padx=16)
         self.feedback_box = ctk.CTkTextbox(self, height=150, wrap="word")
@@ -167,6 +189,7 @@ class MockInterviewApp(ctk.CTk):
         # --- Status bar ---
         self.status_label = ctk.CTkLabel(self, text="Ready.", anchor="w")
         self.status_label.pack(fill="x", padx=16, pady=(0, 10))
+        self._refresh_input_devices()
 
     # ---------- helpers ----------
 
@@ -178,6 +201,38 @@ class MockInterviewApp(ctk.CTk):
         box.delete("1.0", "end")
         box.insert("1.0", text)
         box.configure(state="disabled")
+
+    def _refresh_input_devices(self):
+        try:
+            self.input_devices = AudioRecorder.list_input_devices()
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Could not list audio devices: {exc}", warn=True)
+            return
+        self.input_device_map = {
+            f"{device['index']}: {device['name']}": device["index"]
+            for device in self.input_devices
+        }
+        values = ["Default microphone", *self.input_device_map]
+        self.input_device_menu.configure(values=values)
+        self.input_device_var.set(values[0])
+
+    def _selected_device_index(self):
+        return self.input_device_map.get(self.input_device_var.get())
+
+    def _on_test_microphone(self):
+        self._set_status("Testing microphone for 1/4 second…")
+        threading.Thread(target=self._test_microphone_worker, daemon=True).start()
+
+    def _test_microphone_worker(self):
+        try:
+            level = AudioRecorder.input_level(self._selected_device_index())
+            message = f"Microphone level: {level:.4f}. " + (
+                "Voice detected." if level > 0.01 else "No voice detected; select another input device."
+            )
+            self.after(0, lambda: self._set_status(message, warn=level <= 0.01))
+        except Exception as exc:  # noqa: BLE001
+            error_message = str(exc)
+            self.after(0, lambda: self._set_status(f"Microphone test failed: {error_message}", warn=True))
 
     # ---------- actions ----------
 
@@ -199,7 +254,8 @@ class MockInterviewApp(ctk.CTk):
             self.after(0, lambda: self.record_btn.configure(state="normal"))
             self.after(0, lambda: self._set_status("Question ready. Start recording when you're ready to answer."))
         except Exception as exc:  # noqa: BLE001 - surface any API/config error to the user
-            self.after(0, lambda: self._set_status(f"Error generating question: {exc}", warn=True))
+            error_message = str(exc)
+            self.after(0, lambda: self._set_status(f"Error generating question: {error_message}", warn=True))
         finally:
             self.after(0, lambda: self.get_question_btn.configure(state="normal"))
 
@@ -228,11 +284,43 @@ class MockInterviewApp(ctk.CTk):
             self._stop_recording()
 
     def _start_recording(self):
-        self.recorder.start()
-        self.record_btn.configure(text="⏹ Stop && Get Feedback", fg_color="#7f8c8d")
-        self._set_status("Recording your answer…")
+        try:
+            self.recorder.start(
+                capture_system_audio=self.system_audio_var.get(),
+                device_index=self._selected_device_index(),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface device errors in the UI
+            self._set_status(f"Could not start audio: {exc}", warn=True)
+            return
+        self.record_btn.configure(text="■ Stop Listening", fg_color="#7f8c8d")
+        self._set_textbox(self.transcript_box, "Listening… live transcript will appear here.")
+        self._set_status("Recording permitted audio; transcribing locally…")
         self.timer_running = True
+        self.live_transcript_running = True
         self._tick_timer()
+        self._live_transcribe_tick()
+
+    def _live_transcribe_tick(self):
+        if not self.live_transcript_running or self.live_transcription_in_progress:
+            return
+        snapshot_path = SESSIONS_DIR / "live_snapshot.wav"
+        self.recorder.snapshot_to_wav(snapshot_path)
+        self.live_transcription_in_progress = True
+        threading.Thread(target=self._live_transcribe_worker, args=(snapshot_path,), daemon=True).start()
+        self.after(5000, self._live_transcribe_tick)
+
+    def _live_transcribe_worker(self, audio_path: Path):
+        try:
+            transcript = transcribe(audio_path)
+            if self.live_transcript_running and transcript:
+                self.after(0, lambda: self._set_textbox(self.transcript_box, transcript))
+        except Exception as exc:  # noqa: BLE001 - surface local transcription errors
+            error_message = str(exc)
+            self.after(0, lambda: self._set_status(f"Live transcription error: {error_message}", warn=True))
+        finally:
+            self.live_transcription_in_progress = False
+            if self.live_transcript_running:
+                self.after(100, self._live_transcribe_tick)
 
     def _tick_timer(self):
         if not self.timer_running:
@@ -240,11 +328,14 @@ class MockInterviewApp(ctk.CTk):
         elapsed = int(time.time() - self.recorder.start_time) if self.recorder.start_time else 0
         mins, secs = divmod(elapsed, 60)
         self.timer_label.configure(text=f"{mins:02d}:{secs:02d}")
+        level = self.recorder.input_level
+        self.level_label.configure(text=f"Input level: {level:.4f}")
         self.after(500, self._tick_timer)
 
     def _stop_recording(self):
         self.timer_running = False
-        self.record_btn.configure(state="disabled", text="⏺ Start Recording", fg_color="#c0392b")
+        self.live_transcript_running = False
+        self.record_btn.configure(state="disabled", text="▶ Start Listening", fg_color="#c0392b")
         self._set_status("Transcribing your answer…")
 
         out_path = SESSIONS_DIR / f"answer_{int(time.time())}.wav"
@@ -257,8 +348,10 @@ class MockInterviewApp(ctk.CTk):
         try:
             transcript = transcribe(audio_path)
             self.after(0, lambda: self._set_textbox(self.transcript_box, transcript or "(No speech detected)"))
-            self.after(0, lambda: self._set_status("Getting feedback…"))
+            self.after(0, lambda: self._set_status("Generating suggested answer and feedback…"))
 
+            answer = get_direct_answer(self.current_question, transcript)
+            self.after(0, lambda: self._set_textbox(self.answer_box, answer))
             feedback = get_feedback(self.current_question, transcript)
             self.after(0, lambda: self._set_textbox(self.feedback_box, feedback))
 

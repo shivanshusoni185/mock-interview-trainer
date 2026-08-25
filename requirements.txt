@@ -1,5 +1,6 @@
 customtkinter==5.2.2
 sounddevice==0.4.6
+SoundCard==0.4.4
 soundfile==0.12.1
 numpy==1.26.4
 faster-whisper==1.0.3
