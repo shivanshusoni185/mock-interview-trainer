@@ -22,3 +22,8 @@ Thumbs.db
 # Model cache (faster-whisper downloads models locally)
 .cache/
 models/
+
+# PyInstaller build output
+build/
+dist/
+*.spec

@@ -17,14 +17,17 @@ else. It's an offline-first solo practice loop.
 import threading
 import time
 from pathlib import Path
+from tkinter import filedialog
 
 import customtkinter as ctk
 
-from app.config import SESSIONS_DIR, has_api_key
+from app.config import SESSIONS_DIR, LLM_PROVIDER, has_api_key
 from app.audio_recorder import AudioRecorder
 from app.transcriber import transcribe
 from app.llm_client import generate_question, get_feedback
 from app.session_store import save_round, load_history
+from app.resume_context import load_text_from_file, SUPPORTED_EXTENSIONS
+from app.dashboard import DashboardWindow
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -52,8 +55,9 @@ class MockInterviewApp(ctk.CTk):
         self._build_layout()
 
         if not has_api_key():
+            provider = "Anthropic" if LLM_PROVIDER == "anthropic" else "OpenAI"
             self._set_status(
-                "⚠ No OpenAI API key found. Copy .env.example to .env and add your key.",
+                f"⚠ No {provider} API key found. Copy .env.example to .env and add your key.",
                 warn=True,
             )
 
@@ -62,11 +66,19 @@ class MockInterviewApp(ctk.CTk):
     def _build_layout(self):
         pad = {"padx": 16, "pady": 8}
 
+        header_row = ctk.CTkFrame(self, fg_color="transparent")
+        header_row.pack(fill="x", **pad)
+
         header = ctk.CTkLabel(
-            self, text="🎤 Mock Interview Trainer",
+            header_row, text="🎤 Mock Interview Trainer",
             font=ctk.CTkFont(size=22, weight="bold")
         )
-        header.pack(anchor="w", **pad)
+        header.pack(side="left")
+
+        ctk.CTkButton(
+            header_row, text="📊 Progress Dashboard", width=170,
+            command=self._on_open_dashboard,
+        ).pack(side="right")
 
         # --- Setup row: role / level / topic ---
         setup_frame = ctk.CTkFrame(self)
@@ -86,6 +98,38 @@ class MockInterviewApp(ctk.CTk):
         self.topic_entry = ctk.CTkEntry(setup_frame, placeholder_text="e.g. system design, SQL, leadership")
         self.topic_entry.grid(row=0, column=5, padx=8, pady=8, sticky="ew")
         setup_frame.grid_columnconfigure(5, weight=1)
+
+        # --- Optional resume / job description tailoring ---
+        tailor_frame = ctk.CTkFrame(self)
+        tailor_frame.pack(fill="x", **pad)
+
+        tailor_header = ctk.CTkFrame(tailor_frame, fg_color="transparent")
+        tailor_header.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkLabel(
+            tailor_header, text="Tailor to a role (optional)",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            tailor_header, text="Load resume file…", width=140,
+            command=lambda: self._on_load_context_file(self.resume_box),
+        ).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            tailor_header, text="Load job description file…", width=170,
+            command=lambda: self._on_load_context_file(self.jd_box),
+        ).pack(side="right")
+
+        boxes_row = ctk.CTkFrame(tailor_frame, fg_color="transparent")
+        boxes_row.pack(fill="x", padx=8, pady=8)
+        boxes_row.grid_columnconfigure(0, weight=1)
+        boxes_row.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(boxes_row, text="Resume text").grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(boxes_row, text="Job description text").grid(row=0, column=1, sticky="w")
+
+        self.resume_box = ctk.CTkTextbox(boxes_row, height=60, wrap="word")
+        self.resume_box.grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        self.jd_box = ctk.CTkTextbox(boxes_row, height=60, wrap="word")
+        self.jd_box.grid(row=1, column=1, sticky="ew", padx=(6, 0))
 
         self.get_question_btn = ctk.CTkButton(
             self, text="🎯 Get a Question", command=self._on_get_question
@@ -146,8 +190,10 @@ class MockInterviewApp(ctk.CTk):
         role = self.role_var.get()
         level = self.level_var.get()
         topic = self.topic_entry.get().strip()
+        resume_text = self.resume_box.get("1.0", "end").strip()
+        jd_text = self.jd_box.get("1.0", "end").strip()
         try:
-            question = generate_question(role, level, topic)
+            question = generate_question(role, level, topic, resume_text, jd_text)
             self.current_question = question
             self.after(0, lambda: self._set_textbox(self.question_box, question))
             self.after(0, lambda: self.record_btn.configure(state="normal"))
@@ -156,6 +202,24 @@ class MockInterviewApp(ctk.CTk):
             self.after(0, lambda: self._set_status(f"Error generating question: {exc}", warn=True))
         finally:
             self.after(0, lambda: self.get_question_btn.configure(state="normal"))
+
+    def _on_load_context_file(self, target_box: ctk.CTkTextbox):
+        filetypes = [("Supported files", " ".join(f"*{ext}" for ext in SUPPORTED_EXTENSIONS)),
+                     ("All files", "*.*")]
+        path = filedialog.askopenfilename(title="Select a file", filetypes=filetypes)
+        if not path:
+            return
+        try:
+            text = load_text_from_file(Path(path))
+        except Exception as exc:  # noqa: BLE001 - surface bad file/format to the user
+            self._set_status(f"Couldn't load file: {exc}", warn=True)
+            return
+        target_box.delete("1.0", "end")
+        target_box.insert("1.0", text)
+        self._set_status(f"Loaded {Path(path).name} ({len(text)} chars).")
+
+    def _on_open_dashboard(self):
+        DashboardWindow(self)
 
     def _on_toggle_record(self):
         if not self.recorder.is_recording:
